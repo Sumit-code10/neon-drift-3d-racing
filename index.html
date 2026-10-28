@@ -1,0 +1,131 @@
+<!DOCTYPE html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover"><title>Neon Drift – 3D Racing (CG Mini Project)</title>
+<style>
+html,body{margin:0;height:100%;background:#0d1229;overflow:hidden;touch-action:none;font-family:system-ui,sans-serif;color:#fff;-webkit-user-select:none;user-select:none}
+canvas{display:block;width:100%;height:100%}
+.hud{position:fixed;left:0;right:0;top:0;padding:calc(env(safe-area-inset-top,0px) + 8px) 12px 0;display:flex;justify-content:space-between;pointer-events:none;font-weight:700;font-size:15px;text-shadow:0 1px 4px #000}
+#panel{position:fixed;left:8px;top:calc(env(safe-area-inset-top,0px) + 40px);background:rgba(0,0,0,.62);padding:7px 9px;border-radius:8px;font:10px/1.35 ui-monospace,Menlo,monospace;white-space:pre;pointer-events:none;color:#cfe}
+#tools{position:fixed;right:8px;top:calc(env(safe-area-inset-top,0px) + 36px);display:flex;flex-direction:column;gap:6px}
+.t,.b{background:rgba(255,255,255,.18);border:1px solid rgba(255,255,255,.35);color:#fff;border-radius:10px;font-weight:700;touch-action:none}
+.t{padding:7px 10px;font-size:12px}
+.b{width:64px;height:64px;font-size:24px}
+#pad{position:fixed;left:0;right:0;bottom:0;display:flex;justify-content:space-between;padding:0 14px calc(env(safe-area-inset-bottom,0px) + 14px)}
+#pad div{display:flex;gap:10px}
+#msg{position:fixed;inset:0;display:flex;align-items:center;justify-content:center;text-align:center;font-size:20px;font-weight:800;text-shadow:0 2px 8px #000;padding:20px;line-height:1.4}
+</style></head><body>
+<canvas id="c"></canvas>
+<div class="hud"><span id="sc">Score 0</span><span id="sp">0 km/h</span></div>
+<div id="panel"></div>
+<div id="tools"><button class="t" id="bv">VIEW</button><button class="t" id="bp">PERSP</button><button class="t" id="bi">INFO</button></div>
+<div id="msg">NEON DRIFT<br><small style="font-weight:400">Hold GAS (W / ↑) to start · steer ← →<br>Dodge cars, grab coins</small></div>
+<div id="pad"><div><button class="b" id="L">◀</button><button class="b" id="R">▶</button></div><div><button class="b" id="B">▼</button><button class="b" id="G">▲</button></div></div>
+<script>
+const $=id=>document.getElementById(id);
+/* ---------- Hand-written 4x4 matrix library (column-major) ---------- */
+const m4={
+ I:()=>new Float32Array([1,0,0,0,0,1,0,0,0,0,1,0,0,0,0,1]),
+ mul(a,b){const o=new Float32Array(16);for(let c=0;c<4;c++)for(let r=0;r<4;r++){let s=0;for(let k=0;k<4;k++)s+=a[k*4+r]*b[c*4+k];o[c*4+r]=s}return o},
+ T:(x,y,z)=>new Float32Array([1,0,0,0,0,1,0,0,0,0,1,0,x,y,z,1]),
+ S:(x,y,z)=>new Float32Array([x,0,0,0,0,y,0,0,0,0,z,0,0,0,0,1]),
+ Rx(a){const c=Math.cos(a),s=Math.sin(a);return new Float32Array([1,0,0,0,0,c,s,0,0,-s,c,0,0,0,0,1])},
+ Ry(a){const c=Math.cos(a),s=Math.sin(a);return new Float32Array([c,0,-s,0,0,1,0,0,s,0,c,0,0,0,0,1])},
+ Rz(a){const c=Math.cos(a),s=Math.sin(a);return new Float32Array([c,s,0,0,-s,c,0,0,0,0,1,0,0,0,0,1])},
+ persp(f,a,n,fa){const t=1/Math.tan(f/2);return new Float32Array([t/a,0,0,0,0,t,0,0,0,0,(fa+n)/(n-fa),-1,0,0,2*fa*n/(n-fa),0])},
+ ortho(w,h,n,f){return new Float32Array([1/w,0,0,0,0,1/h,0,0,0,0,-2/(f-n),0,0,0,-(f+n)/(f-n),1])},
+ look(e,t,u){const nm=v=>{const l=Math.hypot(...v);return v.map(x=>x/l)},cr=(a,b)=>[a[1]*b[2]-a[2]*b[1],a[2]*b[0]-a[0]*b[2],a[0]*b[1]-a[1]*b[0]],dt=(a,b)=>a[0]*b[0]+a[1]*b[1]+a[2]*b[2];
+  const z=nm([e[0]-t[0],e[1]-t[1],e[2]-t[2]]),x=nm(cr(u,z)),y=cr(z,x);
+  return new Float32Array([x[0],y[0],z[0],0,x[1],y[1],z[1],0,x[2],y[2],z[2],0,-dt(x,e),-dt(y,e),-dt(z,e),1])}
+};
+/* ---------- WebGL setup ---------- */
+const cv=$('c'),gl=cv.getContext('webgl');
+const VS=`attribute vec3 aP,aN;uniform mat4 uMVP,uM;varying vec3 vN;varying float vD;void main(){gl_Position=uMVP*vec4(aP,1.);vN=(uM*vec4(aN,0.)).xyz;vD=gl_Position.w;}`;
+const FS=`precision mediump float;varying vec3 vN;varying float vD;uniform vec3 uC,uF;void main(){float l=max(dot(normalize(vN),normalize(vec3(.4,1.,.5))),0.);vec3 c=uC*(.35+.8*l);c=mix(c,uF,clamp((vD-30.)/200.,0.,1.));gl_FragColor=vec4(c,1.);}`;
+const sh=(t,s)=>{const o=gl.createShader(t);gl.shaderSource(o,s);gl.compileShader(o);return o};
+const pr=gl.createProgram();gl.attachShader(pr,sh(gl.VERTEX_SHADER,VS));gl.attachShader(pr,sh(gl.FRAGMENT_SHADER,FS));gl.linkProgram(pr);gl.useProgram(pr);
+const P=[],N=[],I=[];
+[[0,0,1],[0,0,-1],[1,0,0],[-1,0,0],[0,1,0],[0,-1,0]].forEach((n,i)=>{
+ const h=n[1]?[0,0,1]:[0,1,0],cr=(a,b)=>[a[1]*b[2]-a[2]*b[1],a[2]*b[0]-a[0]*b[2],a[0]*b[1]-a[1]*b[0]],u=cr(n,h),v=cr(n,u);
+ [[-1,-1],[1,-1],[1,1],[-1,1]].forEach(([a,b])=>{for(let k=0;k<3;k++)P.push(n[k]+a*u[k]+b*v[k]);N.push(...n)});
+ const o=i*4;I.push(o,o+1,o+2,o,o+2,o+3)});
+const buf=(t,d,A)=>{const b=gl.createBuffer();gl.bindBuffer(t,b);gl.bufferData(t,d,gl.STATIC_DRAW)};
+const att=(n,d)=>{buf(gl.ARRAY_BUFFER,new Float32Array(d));const l=gl.getAttribLocation(pr,n);gl.enableVertexAttribArray(l);gl.vertexAttribPointer(l,3,gl.FLOAT,false,0,0)};
+att('aP',P);att('aN',N);buf(gl.ELEMENT_ARRAY_BUFFER,new Uint16Array(I));
+const uMVP=gl.getUniformLocation(pr,'uMVP'),uM=gl.getUniformLocation(pr,'uM'),uC=gl.getUniformLocation(pr,'uC'),uF=gl.getUniformLocation(pr,'uF');
+const SKY=[.05,.07,.16];gl.uniform3fv(uF,SKY);gl.clearColor(...SKY,1);gl.enable(gl.DEPTH_TEST);
+let VP;
+const draw=(M,c)=>{gl.uniformMatrix4fv(uMVP,false,m4.mul(VP,M));gl.uniformMatrix4fv(uM,false,M);gl.uniform3fv(uC,c);gl.drawElements(gl.TRIANGLES,36,gl.UNSIGNED_SHORT,0)};
+const rs=()=>{const d=devicePixelRatio||1;cv.width=innerWidth*d;cv.height=innerHeight*d;gl.viewport(0,0,cv.width,cv.height)};
+addEventListener('resize',rs);rs();
+/* ---------- Car: hierarchical model (parent matrix M applied to every part) ---------- */
+function drawCar(M,col,spin,steer){
+ const d=(t,s,c)=>draw(m4.mul(M,m4.mul(t,s)),c);
+ d(m4.T(0,.55,0),m4.S(1,.28,2),col);                    // body: scaled cube
+ d(m4.T(0,1,.2),m4.S(.8,.27,.9),[.1,.15,.25]);           // cabin
+ d(m4.T(0,1,1.85),m4.S(1,.07,.22),col);                  // spoiler
+ [-.7,.7].forEach(x=>{d(m4.T(x,.6,-2),m4.S(.2,.12,.05),[1,1,.6]);d(m4.T(x,.6,2),m4.S(.2,.12,.05),[1,.1,.1])});
+ [-1,1].forEach(sx=>[-1.3,1.3].forEach(z=>{               // wheels: T * Ry(steer) * Rx(spin) * S
+  const W=m4.mul(m4.T(sx*1.05,.4,z),m4.mul(z<0?m4.Ry(steer):m4.I(),m4.mul(m4.Rx(spin),m4.S(.2,.4,.4))));
+  draw(m4.mul(M,W),[.05,.05,.05])}));
+}
+/* ---------- Game state ---------- */
+const LN=[-3.5,0,3.5],COLS=[[.1,.4,.9],[.95,.75,.1],[.2,.8,.4],[.7,.3,.9],[.95,.5,.1]];
+let carX,carZ,speed,steer,yaw,wheel,coins,obs,cns,nz,over,started,t=0,view=0,ortho=0,info=1,Mcar=m4.I();
+const held={l:0,r:0,g:0,b:0};
+function reset(){carX=0;carZ=0;speed=0;steer=0;yaw=0;wheel=0;coins=0;obs=[];cns=[];nz=-80;over=0;started=0;$('msg').innerHTML='NEON DRIFT<br><small style="font-weight:400">Hold GAS (W / ↑) to start · steer ← →<br>Dodge cars, grab coins</small>';$('msg').style.display='flex'}
+function spawn(){while(nz>carZ-220){obs.push({x:LN[Math.random()*3|0],z:nz,c:COLS[Math.random()*COLS.length|0],s:0});
+ if(Math.random()<.7)cns.push({x:LN[Math.random()*3|0],z:nz-12-Math.random()*10});nz-=22+Math.random()*26}}
+function update(dt){
+ if(over)return;
+ if(held.g&&!started){started=1;$('msg').style.display='none'}
+ speed=Math.max(0,Math.min(70,speed+(held.g?22:held.b?-45:-5)*dt));
+ steer+=((held.r-held.l)-steer)*Math.min(1,dt*8);
+ carX=Math.max(-5,Math.min(5,carX+steer*Math.min(1,speed/12)*11*dt));
+ carZ-=speed*dt;wheel-=speed*dt/.4;yaw=-steer*.28;
+ spawn();
+ obs.forEach(o=>{o.z-=10*dt;o.s-=10*dt/.4;if(Math.abs(o.x-carX)<2.1&&Math.abs(o.z-carZ)<4&&!over){over=1;speed=0;$('msg').innerHTML='CRASH!<br>Score '+score()+'<br><small style="font-weight:400">Tap here or press R to restart</small>';$('msg').style.display='flex'}});
+ obs=obs.filter(o=>o.z<carZ+25);
+ cns=cns.filter(c=>{if(Math.abs(c.x-carX)<1.8&&Math.abs(c.z-carZ)<2.5){coins++;return false}return c.z<carZ+25});
+}
+const score=()=>Math.floor(-carZ/10)+coins*50;
+/* ---------- Render ---------- */
+const hex=(a,b)=>a;
+function render(){
+ gl.clear(gl.COLOR_BUFFER_BIT|gl.DEPTH_BUFFER_BIT);
+ const asp=cv.width/cv.height,pj=ortho?m4.ortho(asp*9,9,.1,400):m4.persp(1,asp,.1,400);
+ const cams=[[[carX*.7,4.2,carZ+9.5],[carX*.9,1,carZ-10],[0,1,0]],[[carX,1.35,carZ-.3],[carX,1.2,carZ-25],[0,1,0]],[[carX,28,carZ+2],[carX,0,carZ-2],[0,0,-1]]][view];
+ VP=m4.mul(pj,m4.look(...cams));
+ const D=(tr,s,c)=>draw(m4.mul(tr,s),c);
+ D(m4.T(0,-.1,carZ),m4.S(400,.1,400),[.08,.25,.12]);      // ground
+ D(m4.T(0,0,carZ),m4.S(6,.05,200),[.16,.17,.2]);          // road
+ const b8=Math.floor(carZ/8)*8;
+ for(let i=-27;i<3;i++){const z=b8+i*8,p=Math.abs(Math.round(z/8))%2;
+  [-1.75,1.75].forEach(x=>D(m4.T(x,.06,z),m4.S(.08,.01,1.6),[1,1,1]));
+  [-6.3,6.3].forEach(x=>D(m4.T(x,.1,z),m4.S(.3,.1,4),p?[.9,.1,.1]:[.95,.95,.95]))}
+ const b14=Math.floor(carZ/14)*14;
+ for(let i=-16;i<3;i++){const z=b14+i*14,h=((Math.round(z/14)*7919)%5+5)%5;
+  [-1,1].forEach(sd=>{const x=sd*(10+h*1.2);
+   D(m4.T(x,1,z),m4.S(.25,1,.25),[.35,.2,.1]);
+   D(m4.T(x,3.2,z),m4.mul(m4.Rz(Math.sin(t*1.5+z)*.06),m4.S(1.2,1.5,1.2)),[.1,.45+h*.05,.2])})}
+ obs.forEach(o=>drawCar(m4.T(o.x,0,o.z),o.c,o.s,0));
+ const pulse=.5*(1+.25*Math.sin(t*6));                     // scaling animation
+ cns.forEach(c=>D(m4.T(c.x,1.2,c.z),m4.mul(m4.Ry(t*3),m4.S(pulse,pulse,.08)),[1,.85,.1]));
+ Mcar=m4.mul(m4.T(carX,0,carZ),m4.mul(m4.Ry(yaw),m4.Rz(-steer*.04)));
+ drawCar(Mcar,[.9,.1,.15],wheel,yaw*.0+steer*-.4);
+}
+function hudUpdate(){
+ $('sc').textContent='Score '+score()+'  ◆'+coins;$('sp').textContent=Math.round(speed*3)+' km/h';
+ if(!info){$('panel').style.display='none';return}$('panel').style.display='block';
+ let s='CAR MODEL MATRIX  M = T·Ry·Rz\n';
+ for(let r=0;r<4;r++){for(let c=0;c<4;c++)s+=Mcar[c*4+r].toFixed(2).padStart(7);s+='\n'}
+ s+='T  = ('+carX.toFixed(1)+', 0, '+carZ.toFixed(0)+')\nRy = '+(yaw*57.3).toFixed(1)+'° (steer yaw)\nWheel = T·Ry(steer)·Rx(spin)·S\nCoin  = T·Ry(spin)·S(pulse)\nTree  = T·Rz(sway)·S\nCam = '+(ortho?'Ortho':'Persp')+' · lookAt';
+ $('panel').textContent=s}
+/* ---------- Input ---------- */
+const K={ArrowLeft:'l',a:'l',ArrowRight:'r',d:'r',ArrowUp:'g',w:'g',ArrowDown:'b',s:'b'};
+addEventListener('keydown',e=>{const k=K[e.key];if(k){held[k]=1;e.preventDefault()}if(e.key=='v')cycleView();if(e.key=='p')togglePersp();if(e.key=='i')toggleInfo();if(e.key=='r')reset()});
+addEventListener('keyup',e=>{const k=K[e.key];if(k)held[k]=0});
+[['L','l'],['R','r'],['G','g'],['B','b']].forEach(([id,k])=>{const e=$(id);e.onpointerdown=ev=>{held[k]=1;ev.preventDefault()};e.onpointerup=e.onpointerout=e.onpointercancel=()=>held[k]=0});
+const cycleView=()=>{view=(view+1)%3;$('bv').textContent=['CHASE','HOOD','TOP'][view]},togglePersp=()=>{ortho^=1;$('bp').textContent=ortho?'ORTHO':'PERSP'},toggleInfo=()=>info^=1;
+$('bv').onclick=cycleView;$('bp').onclick=togglePersp;$('bi').onclick=toggleInfo;$('bv').textContent='CHASE';
+$('msg').onclick=()=>{if(over)reset()};
+reset();let last=0;
+(function f(ts){const dt=Math.min(.05,(ts-last)/1000||0);last=ts;t+=dt;update(dt);render();hudUpdate();requestAnimationFrame(f)})(0);
+</script></body></html>
